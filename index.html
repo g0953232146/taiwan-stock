@@ -677,58 +677,172 @@ function renderFutures(){
     </div>`;
 }
 
-// ── LOOKUP ───────────────────────────────────────────────────
+// ── LOOKUP with REAL TWSE DATA ───────────────────────────────
 function ql(id){document.getElementById('lookIn').value=id;doLook();}
+
+async function fetchTWSEPrice(stockId) {
+  // 用 TWSE OpenAPI 抓最新收盤價（上市股票）
+  try {
+    const today = new Date();
+    const y = today.getFullYear();
+    const m = String(today.getMonth()+1).padStart(2,'0');
+    const dateStr = `${y}${m}01`;
+    const url = `https://www.twse.com.tw/exchangeReport/STOCK_DAY?response=json&date=${dateStr}&stockNo=${stockId}`;
+    const res = await fetch(url);
+    const json = await res.json();
+    if (json.stat === 'OK' && json.data && json.data.length > 0) {
+      const rows = json.data;
+      const last = rows[rows.length-1];
+      const prev = rows.length>1 ? rows[rows.length-2] : null;
+      // fields: 日期,成交股數,成交金額,開盤價,最高價,最低價,收盤價,漲跌價差,成交筆數
+      const px = parseFloat(last[6].replace(/,/g,''));
+      const pvRaw = prev ? parseFloat(prev[6].replace(/,/g,'')) : px;
+      const chgRaw = parseFloat(last[7].replace(/,/g,'').replace('+',''));
+      const chgPct = pvRaw ? parseFloat((chgRaw/pvRaw*100).toFixed(2)) : 0;
+      const title = json.title || '';
+      // 從 title 擷取股票名稱，格式：「台積電 各日成交資訊」
+      const nameMatch = title.match(/^(.+?)\s+各日成交/);
+      const name = nameMatch ? nameMatch[1].trim() : (SNAMES[stockId]||`股票${stockId}`);
+      return { px, pv: pvRaw, chg: chgPct, ptChg: chgRaw, name, source: 'twse', rows };
+    }
+  } catch(e) {}
+  return null;
+}
+
+async function fetchTPEXPrice(stockId) {
+  // 上櫃股票用 TPEX
+  try {
+    const today = new Date();
+    const y = today.getFullYear();
+    const m = String(today.getMonth()+1).padStart(2,'0');
+    const dateStr = `${y}/${m}/01`;
+    const url = `https://www.tpex.org.tw/web/stock/aftertrading/daily_trading_info/st43_result.php?l=zh-tw&d=${encodeURIComponent(dateStr)}&stkno=${stockId}&o=json`;
+    const res = await fetch(url);
+    const json = await res.json();
+    if (json.aaData && json.aaData.length > 0) {
+      const rows = json.aaData;
+      const last = rows[rows.length-1];
+      const prev = rows.length>1 ? rows[rows.length-2] : null;
+      const px = parseFloat(last[6].replace(/,/g,''));
+      const pvRaw = prev ? parseFloat(prev[6].replace(/,/g,'')) : px;
+      const chgRaw = parseFloat((last[7]||'0').replace(/,/g,''));
+      const chgPct = pvRaw ? parseFloat((chgRaw/pvRaw*100).toFixed(2)) : 0;
+      const name = SNAMES[stockId] || `股票${stockId}`;
+      return { px, pv: pvRaw, chg: chgPct, ptChg: chgRaw, name, source: 'tpex', rows };
+    }
+  } catch(e) {}
+  return null;
+}
+
 async function doLook(){
-  const q=document.getElementById('lookIn').value.trim();if(!q)return;
-  const el=document.getElementById('lookRes');
-  el.innerHTML=`<div style="display:flex;gap:10px;align-items:center;padding:16px;background:var(--card);border:1px solid var(--border);border-radius:12px"><div class="dots"><span></span><span></span><span></span></div><div style="font-size:13px;color:var(--t2)">AI 分析 ${q} 中...</div></div>`;
-  await sleep(900);
-  const local=ST.find(s=>s.id===q||s.name.includes(q));
-  const id=local?local.id:q,name=local?local.name:(SNAMES[q]||`股票${q}`);
-  const px=local?local.px:rPx(q),pv=local?local.pv:px*(1+(Math.random()-.52)*.04);
-  const chg=local?local.chg:+((px-pv)/pv*100).toFixed(2);
-  const wr=local?local.wr:Math.floor(Math.random()*30)+45;
-  const lk=local?local.lk:Math.floor(Math.random()*50)+30;
-  const score=local?(local.score||Math.floor(Math.random()*5)+3):Math.floor(Math.random()*5)+3;
-  const prob=local?calcP(local):35+score*9+Math.floor(Math.random()*15);
-  const pat=local?local.pat:rPat();
-  const up=chg>=0,col=up?'var(--up)':'var(--dn)',pt=(px-pv).toFixed(1);
+  const q = document.getElementById('lookIn').value.trim();
+  if(!q) return;
+  const el = document.getElementById('lookRes');
+  el.innerHTML=`<div style="display:flex;gap:10px;align-items:center;padding:16px;background:var(--card);border:1px solid var(--border);border-radius:12px"><div class="dots"><span></span><span></span><span></span></div><div style="font-size:13px;color:var(--t2)">查詢 ${q} 真實股價中...</div></div>`;
+
+  // 先查本地資料
+  const local = ST.find(s=>s.id===q||s.name.includes(q));
+  const stockId = local ? local.id : q;
+
+  // 嘗試抓真實資料（先試上市，再試上櫃）
+  let real = await fetchTWSEPrice(stockId);
+  if(!real) real = await fetchTPEXPrice(stockId);
+
+  // 決定最終數據
+  const name = real ? real.name : (local ? local.name : (SNAMES[q]||`股票${q}`));
+  const px   = real ? real.px  : (local ? local.px  : rPx(q));
+  const pv   = real ? real.pv  : (local ? local.pv  : px*(1+(Math.random()-.52)*.04));
+  const chg  = real ? real.chg : (local ? local.chg : parseFloat(((px-pv)/pv*100).toFixed(2)));
+  const ptChg= real ? real.ptChg : parseFloat((px-pv).toFixed(2));
+  const wr   = local ? local.wr : Math.floor(Math.random()*30)+45;
+  const lk   = local ? local.lk : Math.floor(Math.random()*50)+30;
+  const score= local ? (local.score||Math.floor(Math.random()*5)+3) : Math.floor(Math.random()*5)+3;
+  const prob = Math.min(95, local ? calcP(local) : 35+score*9+Math.floor(Math.random()*15));
+  const pat  = local ? local.pat : rPat();
+  const dataSource = real ? `✅ 真實資料（TWSE ${real.source==='tpex'?'上櫃':'上市'}收盤）` : '⚠️ 模擬資料（查無此股票代號）';
+
+  const up = chg>=0, col=up?'var(--up)':'var(--dn)';
   const stars='★'.repeat(Math.min(5,Math.round(score/2.5)))+'☆'.repeat(5-Math.min(5,Math.round(score/2.5)));
   const probCol=prob>=75?'var(--up)':prob>=55?'var(--gold)':'var(--t3)';
-  const heart=isFav(id)?'❤️':'🤍';
+  const heart=isFav(stockId)?'❤️':'🤍';
   const cm=['🔥 強烈多頭訊號，主力積極布局，爆發力強。','📈 指標轉強，值得追蹤，可小量試單。','👀 部分條件到位，等待確認。','⚠️ 訊號偏弱，觀望為主。'][Math.max(0,4-Math.ceil(score/3))];
+
+  // 計算停損停利
+  const atr = Math.abs(ptChg) * 2.5 || px * 0.035;
+  const stopLoss = (px - atr).toFixed(2);
+  const target1  = (px + atr * 1.5).toFixed(2);
+  const target2  = (px + atr * 3).toFixed(2);
+  const rr = (atr * 1.5 / atr).toFixed(1);
 
   el.innerHTML=`
     <div style="background:var(--card);border:1px solid ${col}40;border-radius:14px;overflow:hidden;animation:slideUp .25s ease">
+
+      <!-- 資料來源標籤 -->
+      <div style="padding:8px 14px;background:${real?'rgba(0,200,150,.08)':'rgba(240,180,41,.08)'};border-bottom:1px solid var(--border);font-size:10px;font-family:var(--mono);color:${real?'var(--dn)':'var(--gold)'}">${dataSource}</div>
+
+      <!-- 股票頭部 -->
       <div style="padding:14px;background:linear-gradient(135deg,${col}10,transparent);border-bottom:1px solid var(--border)">
         <div style="display:flex;justify-content:space-between;align-items:flex-start">
-          <div><div style="font-family:var(--mono);font-size:20px;font-weight:700;color:var(--cyan)">${id}</div><div style="font-size:12px;color:var(--t2);margin-top:2px">${name}</div></div>
+          <div>
+            <div style="font-family:var(--mono);font-size:20px;font-weight:700;color:var(--cyan)">${stockId}</div>
+            <div style="font-size:13px;color:var(--t2);margin-top:2px">${name}</div>
+          </div>
           <div style="display:flex;align-items:flex-start;gap:8px">
-            <div style="text-align:right"><div style="font-family:var(--mono);font-size:22px;font-weight:700;color:${col}">${px.toLocaleString()}</div><div style="font-family:var(--mono);font-size:11px;color:${col};margin-top:2px">${up?'▲':'▼'}${Math.abs(pt)}點 ${up?'+':''}${chg}%</div></div>
-            <button class="fav-btn" data-id="${id}" onclick="togFav('${id}','${name}')" style="margin-top:4px">${heart}</button>
+            <div style="text-align:right">
+              <div style="font-family:var(--mono);font-size:24px;font-weight:700;color:${col}">${px.toLocaleString()}</div>
+              <div style="font-family:var(--mono);font-size:11px;color:${col};margin-top:2px">${up?'▲':'▼'}${Math.abs(ptChg)}點 ${up?'+':''}${chg}%</div>
+            </div>
+            <button class="fav-btn" data-id="${stockId}" onclick="togFav('${stockId}','${name}')" style="margin-top:4px">${heart}</button>
           </div>
         </div>
       </div>
-      <div style="padding:14px;border-bottom:1px solid var(--border)">
+
+      <!-- 停損停利 -->
+      <div style="padding:12px 14px;border-bottom:1px solid var(--border)">
+        <div style="font-size:10px;color:var(--t3);text-transform:uppercase;letter-spacing:1px;margin-bottom:8px">🎯 停損停利建議</div>
+        <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:6px">
+          <div style="background:rgba(255,77,109,.08);border:1px solid rgba(255,77,109,.25);border-radius:8px;padding:9px;text-align:center">
+            <div style="font-size:9px;color:var(--up);margin-bottom:3px">停損點</div>
+            <div style="font-family:var(--mono);font-size:13px;font-weight:700;color:var(--up)">${stopLoss}</div>
+          </div>
+          <div style="background:rgba(0,200,150,.08);border:1px solid rgba(0,200,150,.25);border-radius:8px;padding:9px;text-align:center">
+            <div style="font-size:9px;color:var(--dn);margin-bottom:3px">目標①</div>
+            <div style="font-family:var(--mono);font-size:13px;font-weight:700;color:var(--dn)">${target1}</div>
+          </div>
+          <div style="background:rgba(0,200,150,.12);border:1px solid rgba(0,200,150,.35);border-radius:8px;padding:9px;text-align:center">
+            <div style="font-size:9px;color:var(--dn);margin-bottom:3px">目標②</div>
+            <div style="font-family:var(--mono);font-size:13px;font-weight:700;color:var(--dn)">${target2}</div>
+          </div>
+        </div>
+        <div style="font-size:10px;color:var(--t3);font-family:var(--mono);margin-top:6px">風險報酬比 1：${rr}　昨收 ${pv.toFixed(2)}</div>
+      </div>
+
+      <!-- 評分 -->
+      <div style="padding:12px 14px;border-bottom:1px solid var(--border)">
         <div style="display:flex;justify-content:space-between;margin-bottom:8px"><div style="font-size:11px;color:var(--t3);text-transform:uppercase;letter-spacing:1px">綜合評分</div><div style="font-family:var(--mono);color:var(--gold)">${stars}</div></div>
         <div style="background:var(--border2);border-radius:3px;height:5px;overflow:hidden;margin-bottom:8px"><div style="width:${score/13*100}%;height:100%;background:linear-gradient(90deg,var(--gold),var(--up));border-radius:3px"></div></div>
         <div style="font-size:12px;color:var(--t2);line-height:1.6">${cm}</div>
       </div>
-      <div style="padding:14px;border-bottom:1px solid var(--border)">
+
+      <!-- AI 機率 -->
+      <div style="padding:12px 14px;border-bottom:1px solid var(--border)">
         <div style="display:flex;justify-content:space-between;margin-bottom:6px"><div style="font-size:11px;color:var(--t3);text-transform:uppercase;letter-spacing:1px">🤖 AI 上漲機率</div><div style="font-family:var(--mono);font-size:20px;font-weight:700;color:${probCol}">${prob}%</div></div>
         <div style="background:var(--border2);border-radius:3px;height:5px;overflow:hidden;margin-bottom:6px"><div style="width:${prob}%;height:100%;background:linear-gradient(90deg,var(--purple),var(--cyan));border-radius:3px"></div></div>
         <div style="font-size:10px;color:var(--t3);font-family:var(--mono)">${prob>=75?'極高機率，強烈建議關注':prob>=60?'高機率，積極追蹤':prob>=45?'中等機率，保守操作':'機率偏低，觀望為主'}</div>
       </div>
+
+      <!-- 數據格 -->
       <div style="padding:12px 14px;display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;border-bottom:1px solid var(--border)">
         <div style="background:var(--bg2);border-radius:8px;padding:10px;text-align:center"><div style="font-size:9px;color:var(--t3);margin-bottom:3px">歷史勝率</div><div style="font-family:var(--mono);font-size:14px;font-weight:700;color:var(--dn)">${wr}%</div></div>
         <div style="background:var(--bg2);border-radius:8px;padding:10px;text-align:center"><div style="font-size:9px;color:var(--t3);margin-bottom:3px">籌碼鎖定</div><div style="font-family:var(--mono);font-size:14px;font-weight:700;color:var(--blue)">${lk}%</div></div>
-        <div style="background:var(--bg2);border-radius:8px;padding:10px;text-align:center"><div style="font-size:9px;color:var(--t3);margin-bottom:3px">昨收</div><div style="font-family:var(--mono);font-size:14px;font-weight:700;color:var(--text)">${pv.toFixed(1)}</div></div>
+        <div style="background:var(--bg2);border-radius:8px;padding:10px;text-align:center"><div style="font-size:9px;color:var(--t3);margin-bottom:3px">型態</div><div style="font-size:11px;font-weight:700;color:var(--gold)">${pat}</div></div>
       </div>
+
+      <!-- AI 評論 -->
       <div style="padding:12px 14px">
         <div style="background:rgba(139,92,246,.08);border:1px solid rgba(139,92,246,.2);border-radius:10px;padding:11px">
           <div style="font-size:9px;color:var(--purple);letter-spacing:2px;text-transform:uppercase;margin-bottom:5px">◆ AI 評論</div>
-          <div style="font-size:12px;color:var(--t2);line-height:1.7">${gCmt(name,id,score,prob,pat,chg)}</div>
+          <div style="font-size:12px;color:var(--t2);line-height:1.7">${gCmt(name,stockId,score,prob,pat,chg)}</div>
         </div>
       </div>
     </div>`;
